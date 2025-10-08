@@ -27,7 +27,7 @@ jobs:
       # Step 3: Upload files to S3 while maintaining folder structure
       - name: Upload files to S3
         run: |
-          aws s3 sync . s3://config_files/fhir/ \
+          aws s3 sync . s3://config-files123/fhir/ \
             --exclude ".git/*" \
             --exclude ".github/*" \
             --exclude "*.yml" \
