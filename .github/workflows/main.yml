@@ -32,45 +32,143 @@ jobs:
             --exclude ".github/*" \
             --exclude "README.md" \
             --delete
-# Step 4: Detect changed CloudFormation templates
+
+      # Step 4: Detect changed CloudFormation templates
       - name: Detect changed templates
         id: detect_changes
         run: |
-          # Fetch last 2 commits to compare properly
-          git fetch --prune --unshallow || true
-          git fetch origin main --depth=2 || true
-
-          # Check if previous commit exists
-          if [ "$(git rev-list --count HEAD)" -eq 1 ]; then
-            echo "First commit detected. Considering all templates as changed."
-            CHANGED_FILES=$(find cdp_test/ -type f -path "*/CFT/*" -regex ".*\.\(ya\?ml\|json\|cft\)$")
-          else
-            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep -E 'cdp_test/.*/CFT/.*\.(ya?ml|json|cft)$' || true)
-          fi
-
-          echo "Changed templates:"
-          echo "$CHANGED_FILES"
-          echo "changed_files=$CHANGED_FILES" >> $GITHUB_ENV
+          # Check if this is the first commit
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          echo "Total commits: $COMMIT_COUNT"
           
-# Step 5: Validate each template before deploying
+          if [ "$COMMIT_COUNT" -eq 1 ]; then
+            echo "First commit detected. Considering all templates as changed."
+            CHANGED_FILES=$(find cdp_test/ -type f -path "*/CFT/*" \( -name "*.yaml" -o -name "*.yml" -o -name "*.json" -o -name "*.cft" \) 2>/dev/null || true)
+          else
+            # Get changed CloudFormation template files
+            echo "Comparing HEAD with HEAD~1"
+            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep -E '^cdp/.*/CFT/.*\.(ya?ml|json|cft)$' || true)
+          fi
+          
+          echo "================================"
+          echo "Changed CloudFormation templates:"
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No changes detected"
+          else
+            echo "$CHANGED_FILES"
+          fi
+          echo "================================"
+          
+          # Count number of changed files
+          if [ -z "$CHANGED_FILES" ]; then
+            FILE_COUNT=0
+          else
+            FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l)
+          fi
+          
+          echo "Number of changed files: $FILE_COUNT"
+          
+          # Save files to a temporary file for later steps
+          if [ "$FILE_COUNT" -gt 0 ]; then
+            echo "$CHANGED_FILES" > /tmp/changed_files.txt
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+      # Step 5: Validate each template before deploying
       - name: Validate CloudFormation templates
-        if: env.changed_files != ''
+        if: steps.detect_changes.outputs.has_changes == 'true'
         run: |
-          for file in ${{ env.changed_files }}; do
-            echo "Validating $file..."
-            aws cloudformation validate-template --template-body file://$file || exit 1
-          done
+          echo "Starting validation of CloudFormation templates..."
+          
+          if [ ! -f /tmp/changed_files.txt ]; then
+            echo "Error: No changed files found"
+            exit 1
+          fi
+          
+          VALIDATION_FAILED=0
+          
+          while IFS= read -r file; do
+            if [ -n "$file" ] && [ -f "$file" ]; then
+              echo "-----------------------------------"
+              echo "Validating: $file"
+              if aws cloudformation validate-template --template-body file://"$file"; then
+                echo "✅ Validation successful: $file"
+              else
+                echo "❌ Validation failed: $file"
+                VALIDATION_FAILED=1
+              fi
+            fi
+          done < /tmp/changed_files.txt
+          
+          if [ $VALIDATION_FAILED -eq 1 ]; then
+            echo "❌ One or more templates failed validation"
+            exit 1
+          fi
+          
+          echo "✅ All templates validated successfully"
 
       # Step 6: Deploy updated CloudFormation stacks
       - name: Deploy CloudFormation stacks
-        if: env.changed_files != ''
+        if: steps.detect_changes.outputs.has_changes == 'true'
         run: |
-          for file in ${{ env.changed_files }}; do
-            stack_name=$(basename "$file" | sed 's/\.[^.]*$//')  # stack name = filename without extension
-            echo "Deploying stack: $stack_name"
-            aws cloudformation deploy \
-              --stack-name "$stack_name" \
-              --template-file "$file" \
-              --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-              --no-fail-on-empty-changeset
-          done      
+          echo "Starting deployment of CloudFormation stacks..."
+          
+          if [ ! -f /tmp/changed_files.txt ]; then
+            echo "Error: No changed files found"
+            exit 1
+          fi
+          
+          DEPLOYMENT_FAILED=0
+          DEPLOYED_STACKS=""
+          
+          while IFS= read -r file; do
+            if [ -n "$file" ] && [ -f "$file" ]; then
+              # Extract meaningful stack name from path
+              # Example: cdp/athena/CFT/ec2.cft -> athena-ec2
+              folder=$(echo "$file" | cut -d'/' -f2)  # Gets 'athena' from 'cdp/athena/CFT'
+              filename=$(basename "$file" | sed 's/\.[^.]*$//')  # Gets 'ec2' from 'ec2.cft'
+              stack_name="${folder}-${filename}"
+              
+              echo "-----------------------------------"
+              echo "📦 Deploying stack: $stack_name"
+              echo "   Template: $file"
+              
+              if aws cloudformation deploy \
+                --stack-name "$stack_name" \
+                --template-file "$file" \
+                --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+                --no-fail-on-empty-changeset; then
+                echo "✅ Successfully deployed: $stack_name"
+                DEPLOYED_STACKS="$DEPLOYED_STACKS\n  - $stack_name ($file)"
+              else
+                echo "❌ Deployment failed: $stack_name"
+                DEPLOYMENT_FAILED=1
+              fi
+            fi
+          done < /tmp/changed_files.txt
+          
+          echo "==================================="
+          echo "Deployment Summary:"
+          if [ -n "$DEPLOYED_STACKS" ]; then
+            echo "Successfully deployed stacks:"
+            echo -e "$DEPLOYED_STACKS"
+          fi
+          echo "==================================="
+          
+          if [ $DEPLOYMENT_FAILED -eq 1 ]; then
+            echo "❌ One or more deployments failed"
+            exit 1
+          fi
+          
+          echo "✅ All CloudFormation stacks deployed successfully!"
+
+      # Step 7: Summary
+      - name: Deployment Summary
+        if: always()
+        run: |
+          if [ "${{ steps.detect_changes.outputs.has_changes }}" == "true" ]; then
+            echo "✅ Workflow completed with CloudFormation deployments"
+          else
+            echo "ℹ️  Workflow completed (no CloudFormation changes detected)"
+          fi
