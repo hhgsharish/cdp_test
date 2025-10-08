@@ -30,6 +30,5 @@ jobs:
           aws s3 sync . s3://config-files123/fhir/ \
             --exclude ".git/*" \
             --exclude ".github/*" \
-            --exclude "*.yml" \
             --exclude "README.md" \
             --delete
