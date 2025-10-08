@@ -36,9 +36,18 @@ jobs:
       - name: Detect changed templates
         id: detect_changes
         run: |
-          git fetch origin main
-          # Detect files changed in the last commit and filter only CloudFormation files
-          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep -E 'config_files/fhir/.*/CFT/.*\.(ya?ml|json|cft)$' || true)
+          # Fetch last 2 commits to compare properly
+          git fetch --prune --unshallow || true
+          git fetch origin main --depth=2 || true
+
+          # Check if previous commit exists
+          if [ "$(git rev-list --count HEAD)" -eq 1 ]; then
+            echo "First commit detected. Considering all templates as changed."
+            CHANGED_FILES=$(find config_files/fhir -type f -path "*/CFT/*" -regex ".*\.\(ya\?ml\|json\|cft\)$")
+          else
+            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep -E 'config_files/fhir/.*/CFT/.*\.(ya?ml|json|cft)$' || true)
+          fi
+
           echo "Changed templates:"
           echo "$CHANGED_FILES"
           echo "changed_files=$CHANGED_FILES" >> $GITHUB_ENV
