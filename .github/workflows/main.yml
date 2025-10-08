@@ -32,3 +32,36 @@ jobs:
             --exclude ".github/*" \
             --exclude "README.md" \
             --delete
+# Step 4: Detect changed CloudFormation templates
+      - name: Detect changed templates
+        id: detect_changes
+        run: |
+          git fetch origin main
+          # Detect files changed in the last commit and filter only CloudFormation files
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep -E 'config_files/fhir/.*/CFT/.*\.(ya?ml|json|cft)$' || true)
+          echo "Changed templates:"
+          echo "$CHANGED_FILES"
+          echo "changed_files=$CHANGED_FILES" >> $GITHUB_ENV
+          
+# Step 5: Validate each template before deploying
+      - name: Validate CloudFormation templates
+        if: env.changed_files != ''
+        run: |
+          for file in ${{ env.changed_files }}; do
+            echo "Validating $file..."
+            aws cloudformation validate-template --template-body file://$file || exit 1
+          done
+
+      # Step 6: Deploy updated CloudFormation stacks
+      - name: Deploy CloudFormation stacks
+        if: env.changed_files != ''
+        run: |
+          for file in ${{ env.changed_files }}; do
+            stack_name=$(basename "$file" | sed 's/\.[^.]*$//')  # stack name = filename without extension
+            echo "Deploying stack: $stack_name"
+            aws cloudformation deploy \
+              --stack-name "$stack_name" \
+              --template-file "$file" \
+              --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+              --no-fail-on-empty-changeset
+          done      
