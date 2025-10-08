@@ -1,1 +1,9 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Minimal CloudFormation template to launch a t2.micro EC2 instance in ap-south-1
 
+Resources:
+  MyEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-0f9708d1cd2cfee41
