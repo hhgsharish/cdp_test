@@ -56,13 +56,9 @@ jobs:
           echo "Detecting CloudFormation template changes..."
           
           # Get list of changed CFT files (YAML and JSON)
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             # Manual trigger: check all CFT files
             CHANGED_FILES=$(find . -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.json" \) -path "*/CFT/*" | sed 's|^\./||')
-          else
             # Push event: detect changes between commits
-            CHANGED_FILES=$(git diff --name-only HEAD^ HEAD | grep -E "CFT/.*\.(yaml|yml|json)$" || true)
-          fi
           
           if [ -z "$CHANGED_FILES" ]; then
             echo "No CloudFormation template changes detected"
