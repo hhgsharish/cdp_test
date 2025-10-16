@@ -4,13 +4,13 @@ name: Upload, Deploy and Rollback CloudFormation Stack with new or existing reso
 on:
   push:
     branches: 
-      - dev-iac
+      - main
 
   workflow_dispatch:
 
 env:
   AWS_REGION: ap-south-1
-  S3_BUCKET: test-cdp-lakehouse
+  S3_BUCKET: config-files123
   CFT_BACKUP_PREFIX: backup/cloudformation
 
 jobs:
