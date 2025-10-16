@@ -160,7 +160,7 @@ jobs:
               # Create new stack
               aws cloudformation create-stack \
                 --stack-name "$STACK_NAME" \
-                --template-url "$S3_TEMPLATE_URL" \
+                --template-body "file://$file" \
                 --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
                 --region ${{ env.AWS_REGION }}
               
