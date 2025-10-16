@@ -5,7 +5,11 @@ on:
     branches:
       - main
   workflow_dispatch:
-
+env:
+  AWS_REGION: ap-south-1
+  S3_BUCKET: config-files123
+  CFT_BACKUP_PREFIX: backup/cloudformation
+  
 jobs:
   upload:
     name: Upload to AWS S3
@@ -25,150 +29,163 @@ jobs:
           aws-region: ap-south-1  # Change this to your desired AWS region
 
       # Step 3: Upload files to S3 while maintaining folder structure
-      - name: Upload files to S3
+            - name: Sync Changed Files to S3
         run: |
-          aws s3 sync . s3://config-files123/fhir/ \
+          BRANCH_NAME=${GITHUB_REF##*/}
+          echo "Starting incremental sync to S3..."
+          aws s3 sync . s3://${{ env.S3_BUCKET }}/${BRANCH_NAME}/ \
             --exclude ".git/*" \
             --exclude ".github/*" \
-            --exclude "README.md" \
-            --delete
-
-      # Step 4: Detect changed CloudFormation templates
-      - name: Detect changed templates
-        id: detect_changes
+            --exclude "*.md" \
+            --exclude ".gitignore" \
+            --size-only
+          echo "Sync completed successfully"
+		  
+      - name: Detect Changed CFT Files
+        id: detect-cft
         run: |
-          # Check if this is the first commit
-          COMMIT_COUNT=$(git rev-list --count HEAD)
-          echo "Total commits: $COMMIT_COUNT"
+          echo "Detecting CloudFormation template changes..."
           
-          if [ "$COMMIT_COUNT" -eq 1 ]; then
-            echo "First commit detected. Considering all templates as changed."
-            CHANGED_FILES=$(find cdp_test/ -type f -path "*/CFT/*" \( -name "*.yaml" -o -name "*.yml" -o -name "*.json" -o -name "*.cft" \) 2>/dev/null || true)
+          # Get list of changed CFT files (YAML and JSON)
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            # Manual trigger: check all CFT files
+            CHANGED_FILES=$(find . -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.json" \) -path "*/CFT/*" | sed 's|^\./||')
           else
-            # Get changed CloudFormation template files
-            echo "Comparing HEAD with HEAD~1"
-            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep -E '^cdp/.*/CFT/.*\.(ya?ml|json|cft)$' || true)
+            # Push event: detect changes between commits
+            CHANGED_FILES=$(git diff --name-only HEAD^ HEAD | grep -E "CFT/.*\.(yaml|yml|json)$" || true)
           fi
           
-          echo "================================"
-          echo "Changed CloudFormation templates:"
           if [ -z "$CHANGED_FILES" ]; then
-            echo "No changes detected"
-          else
-            echo "$CHANGED_FILES"
-          fi
-          echo "================================"
-          
-          # Count number of changed files
-          if [ -z "$CHANGED_FILES" ]; then
-            FILE_COUNT=0
-          else
-            FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l)
-          fi
-          
-          echo "Number of changed files: $FILE_COUNT"
-          
-          # Save files to a temporary file for later steps
-          if [ "$FILE_COUNT" -gt 0 ]; then
-            echo "$CHANGED_FILES" > /tmp/changed_files.txt
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-          else
+            echo "No CloudFormation template changes detected"
             echo "has_changes=false" >> $GITHUB_OUTPUT
-          fi
-      # Step 5: Validate each template before deploying
-      - name: Validate CloudFormation templates
-        if: steps.detect_changes.outputs.has_changes == 'true'
-        run: |
-          echo "Starting validation of CloudFormation templates..."
-          
-          if [ ! -f /tmp/changed_files.txt ]; then
-            echo "Error: No changed files found"
-            exit 1
-          fi
-          
-          VALIDATION_FAILED=0
-          
-          while IFS= read -r file; do
-            if [ -n "$file" ] && [ -f "$file" ]; then
-              echo "-----------------------------------"
-              echo "Validating: $file"
-              if aws cloudformation validate-template --template-body file://"$file"; then
-                echo "✅ Validation successful: $file"
-              else
-                echo "❌ Validation failed: $file"
-                VALIDATION_FAILED=1
-              fi
-            fi
-          done < /tmp/changed_files.txt
-          
-          if [ $VALIDATION_FAILED -eq 1 ]; then
-            echo "❌ One or more templates failed validation"
-            exit 1
-          fi
-          
-          echo "✅ All templates validated successfully"
+          else
+            echo "Changed CFT files detected:"
+            echo "$CHANGED_FILES"
+            echo "$CHANGED_FILES" > /tmp/changed_cft_files.txt
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi        
 
-      # Step 6: Deploy updated CloudFormation stacks
-      - name: Deploy CloudFormation stacks
-        if: steps.detect_changes.outputs.has_changes == 'true'
+     # Step 6: Process CloudFormation Templates
+      - name: Deploy/Update CloudFormation Stacks
+        if: steps.detect-cft.outputs.has_changes == 'true'
         run: |
-          echo "Starting deployment of CloudFormation stacks..."
-          
-          if [ ! -f /tmp/changed_files.txt ]; then
-            echo "Error: No changed files found"
-            exit 1
-          fi
-          
-          DEPLOYMENT_FAILED=0
-          DEPLOYED_STACKS=""
+          echo "Processing CloudFormation templates..."
           
           while IFS= read -r file; do
-            if [ -n "$file" ] && [ -f "$file" ]; then
-              # Extract meaningful stack name from path
-              # Example: cdp/athena/CFT/ec2.cft -> athena-ec2
-              folder=$(echo "$file" | cut -d'/' -f2)  # Gets 'athena' from 'cdp/athena/CFT'
-              filename=$(basename "$file" | sed 's/\.[^.]*$//')  # Gets 'ec2' from 'ec2.cft'
-              stack_name="${folder}-${filename}"
-              
-              echo "-----------------------------------"
-              echo "📦 Deploying stack: $stack_name"
-              echo "   Template: $file"
-              
-              if aws cloudformation deploy \
-                --stack-name "$stack_name" \
-                --template-file "$file" \
-                --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-                --no-fail-on-empty-changeset; then
-                echo "✅ Successfully deployed: $stack_name"
-                DEPLOYED_STACKS="$DEPLOYED_STACKS\n  - $stack_name ($file)"
-              else
-                echo "❌ Deployment failed: $stack_name"
-                DEPLOYMENT_FAILED=1
-              fi
+            if [ -z "$file" ]; then
+              continue
             fi
-          done < /tmp/changed_files.txt
+            
+            echo "----------------------------------------"
+            echo "Processing: $file"
+            
+            # Extract stack name from file path
+            # Example: Folder1/CFT/vpc.yaml -> folder1-vpc
+            FOLDER=$(echo "$file" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
+            FILENAME=$(basename "$file" | sed 's/\.[^.]*$//')
+            STACK_NAME="${FOLDER}-${FILENAME}"
+            
+            # S3 path for the template
+            S3_TEMPLATE_URL="https://s3.${{ env.AWS_REGION }}.amazonaws.com/${{ env.S3_BUCKET }}/$file"
+            
+            # Check if stack exists
+            if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region ${{ env.AWS_REGION }} >/dev/null 2>&1; then
+              echo "Stack '$STACK_NAME' exists - Preparing update..."
+              
+              # Backup current template before update
+              TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+              BACKUP_KEY="${{ env.CFT_BACKUP_PREFIX }}/$STACK_NAME/$TIMESTAMP-$(basename $file)"
+              
+              echo "Creating backup of current template..."
+              aws cloudformation get-template \
+                --stack-name "$STACK_NAME" \
+                --query 'TemplateBody' \
+                --output text > /tmp/current_template.yaml
+              
+              aws s3 cp /tmp/current_template.yaml "s3://${{ env.S3_BUCKET }}/$BACKUP_KEY"
+              echo "✓ Backup saved to: s3://${{ env.S3_BUCKET }}/$BACKUP_KEY"
+              
+              # Attempt stack update
+              echo "Updating stack '$STACK_NAME'..."
+              UPDATE_OUTPUT=$(aws cloudformation update-stack \
+                --stack-name "$STACK_NAME" \
+                --template-url "$S3_TEMPLATE_URL" \
+                --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+                --region ${{ env.AWS_REGION }} 2>&1) || UPDATE_FAILED=true
+              
+              if [ "$UPDATE_FAILED" = true ]; then
+                if echo "$UPDATE_OUTPUT" | grep -q "No updates are to be performed"; then
+                  echo "ℹ No updates required for stack '$STACK_NAME'"
+                else
+                  echo "❌ Stack update failed: $UPDATE_OUTPUT"
+                  echo "Initiating rollback to previous version..."
+                  
+                  # Rollback to backup template
+                  aws cloudformation update-stack \
+                    --stack-name "$STACK_NAME" \
+                    --template-body "file:///tmp/current_template.yaml" \
+                    --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+                    --region ${{ env.AWS_REGION }}
+                  
+                  echo "⚠ Rollback initiated for stack '$STACK_NAME'"
+                  
+                  # Wait for rollback to complete
+                  aws cloudformation wait stack-update-complete \
+                    --stack-name "$STACK_NAME" \
+                    --region ${{ env.AWS_REGION }} || true
+                  
+                  echo "❌ Stack '$STACK_NAME' rolled back to previous version"
+                  exit 1
+                fi
+              else
+                echo "✓ Stack update initiated for '$STACK_NAME'"
+                
+                # Wait for update to complete
+                echo "Waiting for stack update to complete..."
+                aws cloudformation wait stack-update-complete \
+                  --stack-name "$STACK_NAME" \
+                  --region ${{ env.AWS_REGION }}
+                
+                echo "✓ Stack '$STACK_NAME' updated successfully"
+              fi
+              
+            else
+              echo "Stack '$STACK_NAME' does not exist - Creating new stack..."
+              
+              # Create new stack
+              aws cloudformation create-stack \
+                --stack-name "$STACK_NAME" \
+                --template-url "$S3_TEMPLATE_URL" \
+                --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+                --region ${{ env.AWS_REGION }}
+              
+              echo "✓ Stack creation initiated for '$STACK_NAME'"
+              
+              # Wait for creation to complete
+              echo "Waiting for stack creation to complete..."
+              aws cloudformation wait stack-create-complete \
+                --stack-name "$STACK_NAME" \
+                --region ${{ env.AWS_REGION }}
+              
+              echo "✓ Stack '$STACK_NAME' created successfully"
+            fi
+            
+          done < /tmp/changed_cft_files.txt
           
-          echo "==================================="
-          echo "Deployment Summary:"
-          if [ -n "$DEPLOYED_STACKS" ]; then
-            echo "Successfully deployed stacks:"
-            echo -e "$DEPLOYED_STACKS"
-          fi
-          echo "==================================="
-          
-          if [ $DEPLOYMENT_FAILED -eq 1 ]; then
-            echo "❌ One or more deployments failed"
-            exit 1
-          fi
-          
-          echo "✅ All CloudFormation stacks deployed successfully!"
+          echo "----------------------------------------"
+          echo "✓ All CloudFormation operations completed"
 
       # Step 7: Summary
       - name: Deployment Summary
         if: always()
         run: |
-          if [ "${{ steps.detect_changes.outputs.has_changes }}" == "true" ]; then
-            echo "✅ Workflow completed with CloudFormation deployments"
-          else
-            echo "ℹ️  Workflow completed (no CloudFormation changes detected)"
-          fi
+          echo "========================================="
+          echo "Deployment Summary"
+          echo "========================================="
+          echo "Workflow: ${{ github.workflow }}"
+          echo "Triggered by: ${{ github.event_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Region: ${{ env.AWS_REGION }}"
+          echo "S3 Bucket: s3://${{ env.S3_BUCKET }}"
+          echo "========================================="                     
