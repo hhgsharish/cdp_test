@@ -1,25 +1,31 @@
-name: Upload Files to S3
+
+name: Upload, Deploy and Rollback CloudFormation Stack with new or existing resources.
 
 on:
   push:
-    branches:
-      - main
+    branches: 
+      - dev-iac
+
   workflow_dispatch:
+
 env:
   AWS_REGION: ap-south-1
-  S3_BUCKET: config-files123
+  S3_BUCKET: test-cdp-lakehouse
   CFT_BACKUP_PREFIX: backup/cloudformation
-  
-jobs:
-  upload:
-    name: Upload to AWS S3
-    runs-on: ubuntu-latest
 
+jobs:
+  sync-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for OIDC authentication with AWS
+      contents: read    # Required to checkout the repository
     steps:
       # Step 1: Checkout the repository
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
-
+        with:
+          fetch-depth: 2  # Fetch last 2 commits to detect changes
+      
       # Step 2: Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -28,7 +34,9 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ap-south-1  # Change this to your desired AWS region
 
-      # Step 3: Upload files to S3 while maintaining folder structure
+      # Step 4: Sync Repository to S3 (Incremental)
+      # Uses --size-only and --delete flags for efficient syncing
+      #--delete flag removes files from S3 that no longer exist in the repo
       - name: Sync Changed Files to S3
         run: |
           BRANCH_NAME=${GITHUB_REF##*/}
@@ -40,7 +48,8 @@ jobs:
             --exclude ".gitignore" \
             --size-only
           echo "Sync completed successfully"
-		  
+
+      # Step 5: Detect Changed CloudFormation Templates
       - name: Detect Changed CFT Files
         id: detect-cft
         run: |
@@ -188,4 +197,4 @@ jobs:
           echo "Branch: ${{ github.ref_name }}"
           echo "Region: ${{ env.AWS_REGION }}"
           echo "S3 Bucket: s3://${{ env.S3_BUCKET }}"
-          echo "========================================="                     
+          echo "========================================="          
